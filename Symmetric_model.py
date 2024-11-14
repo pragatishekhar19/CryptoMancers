@@ -1,9 +1,13 @@
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.metrics import accuracy_score, classification_report
 from sklearn.preprocessing import LabelEncoder
-from scipy.stats import entropy
+from sklearn.model_selection import train_test_split
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv1D, Flatten, Dense, MaxPooling1D, Dropout
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.models import save_model
 import pickle
 
 # Function to load dataset from a given path
@@ -13,42 +17,64 @@ def load_dataset(file_path):
     df.dropna(subset=['plaintext', 'ciphertext', 'key'], inplace=True)
     return df
 
-# Feature Engineering
-def extract_features(plaintext, ciphertext, key):
-    def compute_features(data):
+# Preprocess data to fixed-length byte sequences
+def preprocess_data(df, sequence_length=256):
+    def to_byte_sequence(data, max_length=sequence_length):
         byte_array = np.array(list(data.encode()), dtype=np.uint8)
-        mean = np.mean(byte_array)
-        variance = np.var(byte_array)
-        entropy_value = entropy(np.bincount(byte_array, minlength=256) / len(byte_array))
-        return [mean, variance, entropy_value]
+        padded_array = np.zeros(max_length, dtype=np.uint8)
+        length = min(len(byte_array), max_length)
+        padded_array[:length] = byte_array[:length]
+        return padded_array
 
-    # Extract features for plaintext, ciphertext, and key
-    plaintext_features = compute_features(plaintext)
-    ciphertext_features = compute_features(ciphertext)
-    key_features = compute_features(key)
+    # Apply the conversion to plaintext, ciphertext, and key columns
+    plaintexts = np.array([to_byte_sequence(pt) for pt in df['plaintext']])
+    ciphertexts = np.array([to_byte_sequence(ct) for ct in df['ciphertext']])
+    keys = np.array([to_byte_sequence(k) for k in df['key']])
 
-    # Combine features into a single feature vector
-    return plaintext_features + ciphertext_features + key_features
+    # Stack to create a 3D input of shape (samples, sequence_length, channels)
+    return np.stack([plaintexts, ciphertexts, keys], axis=-1)
 
-# Load training data
-training_file_path = r'/content/symmetric_with_key.csv'  # Replace with your training dataset path
-df_train = load_dataset(training_file_path)
-
-# Apply feature extraction
-features_train = np.array([extract_features(row['plaintext'], row['ciphertext'], row['key']) for _, row in df_train.iterrows()])
-labels_train = df_train['algorithm']
+# Load dataset and preprocess
+file_path = r'D:/SIH/Symmetric model/symmetric_with_key.csv'  # Replace with your dataset path
+df = load_dataset(file_path)
+X = preprocess_data(df)
+labels = df['algorithm']
 
 # Encode labels
 label_encoder = LabelEncoder()
-y_train = label_encoder.fit_transform(labels_train)
+y = label_encoder.fit_transform(labels)
+y = to_categorical(y)  # One-hot encode for CNN
 
-# Train Gradient Boosting model
-gb_model = GradientBoostingClassifier(n_estimators=100, random_state=42)
-gb_model.fit(features_train, y_train)
-print("Model trained successfully.")
+# Split the data into training and testing sets
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# Save the model to a pickle file
-model_filename = 'gb_model.pkl'
-with open(model_filename, 'wb') as file:
-    pickle.dump(gb_model, file)
-print(f"Model saved to {model_filename}.")
+# Define CNN model
+model = Sequential([
+    Conv1D(64, kernel_size=3, activation='relu', input_shape=(X.shape[1], X.shape[2])),
+    MaxPooling1D(pool_size=2),
+    Conv1D(128, kernel_size=3, activation='relu'),
+    MaxPooling1D(pool_size=2),
+    Flatten(),
+    Dense(128, activation='relu'),
+    Dropout(0.5),
+    Dense(y.shape[1], activation='softmax')  # Output layer with softmax for multi-class classification
+])
+
+# Compile the model
+model.compile(optimizer=Adam(learning_rate=0.001), loss='categorical_crossentropy', metrics=['accuracy'])
+
+# Set up early stopping
+early_stopping = EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)
+
+# Train the model
+history = model.fit(X_train, y_train, validation_split=0.2, epochs=20, batch_size=32, callbacks=[early_stopping])
+
+# Evaluate the model
+test_loss, test_accuracy = model.evaluate(X_test, y_test)
+print(f"Test Accuracy: {test_accuracy * 100:.2f}%")
+
+# Save the model and label encoder
+model.save('cnn_model.h5')
+with open('label_encoder.pkl', 'wb') as file:
+    pickle.dump(label_encoder, file)
+print("CNN model and label encoder saved.")
